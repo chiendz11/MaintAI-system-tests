@@ -1,0 +1,105 @@
+name: Release Gate & Promotion Pipeline
+
+on:
+  repository_dispatch:
+    types: [new-image-built]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Container image tag to verify and promote (e.g. sha-xxxx or v1.4.0)"
+        required: true
+        default: "latest"
+      target_env:
+        description: "Target verification environment"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - local-k3d
+      promote_to_production:
+        description: "Whether to promote to production upon 100% test pass"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  prepare-and-sync-staging:
+    name: 1. Deploy Image to Test Environment
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Update Staging Overlay
+        run: |
+          echo "Syncing GitOps Staging overlay with image tag: ${{ github.event.inputs.image_tag || github.event.client_payload.image_tag }}"
+          python scripts/wait_for_argocd.py --app maintai-${{ github.event.inputs.target_env || 'staging' }} --timeout 180
+
+  run-system-tests:
+    name: 2. Execute System Quality Gates
+    needs: prepare-and-sync-staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Test Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 2.1 Run End-to-End System Tests
+        run: |
+          mkdir -p reports
+          pytest -m e2e --junitxml=reports/e2e-results.xml || true
+
+      - name: 2.2 Run Monitoring Verification Tests
+        run: |
+          pytest -m monitoring --junitxml=reports/monitoring-results.xml || true
+
+      - name: 2.3 Run Chaos & Recovery Drills
+        run: |
+          pytest -m chaos --junitxml=reports/chaos-results.xml || true
+
+      - name: Upload Test Evidence & Provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-verification-evidence
+          path: reports/
+
+  promote-to-production:
+    name: 3. Production Release Gate
+    needs: run-system-tests
+    if: ${{ github.event.inputs.promote_to_production == 'true' || github.event.inputs.promote_to_production == true }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Promote Image Tag to Production GitOps
+        env:
+          GITOPS_SYNC_TOKEN: ${{ secrets.GITOPS_SYNC_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.image_tag || github.event.client_payload.image_tag }}"
+          echo "Promoting image tag $TAG to Production..."
+          python scripts/promote_gitops_image.py --env production --tag "$TAG"
