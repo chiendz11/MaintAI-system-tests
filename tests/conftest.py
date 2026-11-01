@@ -1,7 +1,9 @@
 import time
 from uuid import uuid4
+
 import httpx
 import pytest
+
 from config.settings import settings
 
 

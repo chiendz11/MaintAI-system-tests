@@ -7,6 +7,7 @@ Usage:
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -38,7 +39,6 @@ def promote_image(target_env: str, image_tag: str, token: str, gitops_repo: str 
 
         content = env_kustomization.read_text(encoding="utf-8")
         # Replace image tags
-        import re
         # Pattern to replace newTag: <anything> with newTag: <image_tag>
         updated_content = re.sub(r"newTag:\s*['\"]?[\w\-\.]+['\"]?", f"newTag: '{image_tag}'", content)
         env_kustomization.write_text(updated_content, encoding="utf-8")
